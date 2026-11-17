@@ -1,5 +1,6 @@
-/* Lumen Drift — page chrome around the canvas. The game itself draws
-   everything inside the canvas; this only centers it on a dark page. */
+/* Lumen Drift v2 — page chrome around the canvas. The game itself draws
+   everything inside the canvas; this only centers it on a dark page, with
+   keyboard-visible focus and a real mute button. */
 * {
   box-sizing: border-box;
   margin: 0;
@@ -61,12 +62,19 @@ canvas {
   border-radius: 10px;
   background: #070b1a;
   cursor: crosshair;
+  touch-action: none;
+  outline: none;
+}
+
+canvas:focus-visible {
+  box-shadow: 0 0 0 3px rgba(87, 247, 255, 0.8), 0 0 30px rgba(87, 247, 255, 0.4);
 }
 
 .controls {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
+  align-items: center;
   gap: 8px 18px;
   font-size: 13px;
   color: #8fa8c8;
@@ -75,4 +83,32 @@ canvas {
 .controls b {
   color: #eaf6ff;
   font-weight: 600;
+}
+
+.controls button {
+  font: inherit;
+  color: #eaf6ff;
+  background: rgba(87, 247, 255, 0.12);
+  border: 1px solid rgba(87, 247, 255, 0.45);
+  border-radius: 6px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+
+.controls button:hover {
+  background: rgba(87, 247, 255, 0.22);
+}
+
+.controls button:focus-visible {
+  outline: 2px solid #57f7ff;
+  outline-offset: 2px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
 }

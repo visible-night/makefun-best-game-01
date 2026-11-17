@@ -1,18 +1,31 @@
-// Keyboard and mouse state, translated into arena coordinates.
-// The canvas is scaled by CSS, so mouse positions are mapped back through
-// its bounding box into the fixed logical arena.
+// Keyboard and pointer state, translated into arena coordinates.
+// One Pointer Events stream covers mouse, touch and pen. Handlers only
+// record state; the game loop reads it each fixed step. Action presses are
+// timestamped so a dash or nova pressed a few milliseconds early still
+// lands: buffered() consumes a press made within the buffer window.
 import { ARENA_WIDTH, ARENA_HEIGHT } from './config.js';
+
+const BUFFER_MS = 150;
 
 export function createInput(canvas) {
   const keys = new Set();
+  const pressed = new Set();
+  const pressTimes = new Map();
   const input = {
     keys,
     mouseX: ARENA_WIDTH / 2,
     mouseY: ARENA_HEIGHT / 3,
     firing: false,
-    // Edge-triggered actions, consumed once per frame by the game loop.
-    pressed: new Set(),
+    // Called once on the first real gesture; main.js uses it to unlock audio.
+    onFirstGesture: null,
   };
+  let gestured = false;
+
+  function gesture() {
+    if (gestured) return;
+    gestured = true;
+    if (typeof input.onFirstGesture === 'function') input.onFirstGesture();
+  }
 
   function toArena(event) {
     const rect = canvas.getBoundingClientRect();
@@ -22,12 +35,22 @@ export function createInput(canvas) {
     };
   }
 
+  function notePress(name) {
+    pressed.add(name);
+    pressTimes.set(name, performance.now());
+  }
+
   window.addEventListener('keydown', (event) => {
     const key = event.key.toLowerCase();
     if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].includes(key)) {
       event.preventDefault();
     }
-    if (!event.repeat) input.pressed.add(key);
+    gesture();
+    if (!event.repeat) {
+      notePress(key);
+      if (key === ' ') notePress('dash');
+      if (key === 'e') notePress('nova');
+    }
     keys.add(key);
   });
   window.addEventListener('keyup', (event) => {
@@ -35,19 +58,32 @@ export function createInput(canvas) {
   });
   window.addEventListener('blur', () => {
     keys.clear();
+    pressed.clear();
     input.firing = false;
   });
 
-  canvas.addEventListener('mousemove', (event) => {
+  canvas.addEventListener('pointermove', (event) => {
     const pos = toArena(event);
     input.mouseX = pos.x;
     input.mouseY = pos.y;
   });
-  canvas.addEventListener('mousedown', (event) => {
-    if (event.button === 0) input.firing = true;
-    if (event.button === 2) input.pressed.add('nova');
+  canvas.addEventListener('pointerdown', (event) => {
+    gesture();
+    try {
+      canvas.setPointerCapture(event.pointerId);
+    } catch (error) {
+      // Capture is a nicety; the game plays fine without it.
+    }
+    const pos = toArena(event);
+    input.mouseX = pos.x;
+    input.mouseY = pos.y;
+    if (event.button === 0) {
+      input.firing = true;
+      notePress('click'); // edge-triggered, so a held button never restarts a run
+    }
+    if (event.button === 2) notePress('nova');
   });
-  window.addEventListener('mouseup', (event) => {
+  window.addEventListener('pointerup', (event) => {
     if (event.button === 0) input.firing = false;
   });
   canvas.addEventListener('contextmenu', (event) => event.preventDefault());
@@ -67,8 +103,23 @@ export function createInput(canvas) {
     return { x, y };
   };
 
-  input.wasPressed = (key) => input.pressed.has(key);
-  input.endFrame = () => input.pressed.clear();
+  // Edge-triggered key, true only on the frame it was pressed.
+  input.wasPressed = (key) => pressed.has(key);
+
+  // True when the named action was pressed within the buffer window, and
+  // consumes it so it fires exactly once.
+  input.buffered = (action, windowMs = BUFFER_MS) => {
+    const at = pressTimes.get(action);
+    if (at === undefined) return false;
+    if (performance.now() - at > windowMs) {
+      pressTimes.delete(action);
+      return false;
+    }
+    pressTimes.delete(action);
+    return true;
+  };
+
+  input.endFrame = () => pressed.clear();
 
   return input;
 }

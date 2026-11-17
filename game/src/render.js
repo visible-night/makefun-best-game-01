@@ -1,8 +1,14 @@
-// Lumen Drift — every pixel the game draws: the starfield, the arena, the
-// ships, the HUD and the title / pause / game-over screens. Canvas 2D only,
-// with glow drawn through shadowBlur and layered gradients.
-import { ARENA_WIDTH, ARENA_HEIGHT, PLAYER, COLORS, ENEMIES } from './config.js';
-import { multiplier } from './world.js';
+// Lumen Drift v2 — every pixel the game draws: the starfield, the arena,
+// the ships, the HUD and the title / pause / game-over screens. Canvas 2D
+// only, with glow drawn through shadowBlur and layered gradients. The main
+// loop sets the devicePixelRatio transform before each render, so all
+// drawing here works in logical arena pixels.
+import { ARENA_WIDTH, ARENA_HEIGHT, PLAYER, COLORS, WEAPONS } from './config.js';
+import { multiplier, comboFraction, weaponProgress } from './world.js';
+import { shakeOffset } from './juice.js';
+import { easeOutCubic, easeOutBack, clamp } from './random.js';
+
+const FONT = '"Segoe UI", system-ui, sans-serif';
 
 function glow(ctx, color, blur) {
   ctx.shadowColor = color;
@@ -31,14 +37,17 @@ function drawStarfield(ctx, world) {
     ctx.fillRect(0, 0, ARENA_WIDTH, ARENA_HEIGHT);
   }
 
+  // Stars drift with time and parallax against the player's position.
   for (const star of world.stars) {
     const drift = world.time * (2 + star.layer * 4);
-    const x = (star.x + drift) % ARENA_WIDTH;
+    let x = (star.x + drift - world.player.x * 0.02 * star.layer) % ARENA_WIDTH;
+    if (x < 0) x += ARENA_WIDTH;
+    const y = (star.y - world.player.y * 0.01 * star.layer + ARENA_HEIGHT) % ARENA_HEIGHT;
     const alpha = 0.35 + 0.3 * Math.sin(world.time * 1.5 + star.twinkle) + star.layer * 0.15;
     ctx.globalAlpha = Math.max(0.1, Math.min(1, alpha));
     ctx.fillStyle = '#cfe8ff';
     ctx.beginPath();
-    ctx.arc(x, star.y, star.size, 0, Math.PI * 2);
+    ctx.arc(x, y, star.size, 0, Math.PI * 2);
     ctx.fill();
   }
   ctx.globalAlpha = 1;
@@ -49,22 +58,82 @@ function drawStarfield(ctx, world) {
   ctx.strokeRect(6, 6, ARENA_WIDTH - 12, ARENA_HEIGHT - 12);
 }
 
-function drawPlayer(ctx, world) {
-  const player = world.player;
-  if (world.state === 'over' || world.state === 'title') return;
-  const blink = player.invulnerable > 0 && Math.floor(world.time * 14) % 2 === 0;
-  if (blink) return;
-  ctx.save();
-  ctx.translate(player.x, player.y);
-  ctx.rotate(player.angle);
-  glow(ctx, COLORS.player, 18);
-  ctx.fillStyle = COLORS.player;
+function drawRings(ctx, world) {
+  for (const ringItem of world.juice.rings) {
+    const t = ringItem.life / ringItem.maxLife;
+    ctx.globalAlpha = Math.max(0, t);
+    ctx.strokeStyle = ringItem.color;
+    ctx.lineWidth = Math.max(1, ringItem.width * t);
+    glow(ctx, ringItem.color, 12);
+    ctx.beginPath();
+    ctx.arc(ringItem.x, ringItem.y, ringItem.radius, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  noGlow(ctx);
+}
+
+function drawShipShape(ctx) {
   ctx.beginPath();
   ctx.moveTo(18, 0);
   ctx.lineTo(-10, 11);
   ctx.lineTo(-5, 0);
   ctx.lineTo(-10, -11);
   ctx.closePath();
+}
+
+function drawGhosts(ctx, world) {
+  for (const ghostItem of world.juice.ghosts) {
+    ctx.save();
+    ctx.translate(ghostItem.x, ghostItem.y);
+    ctx.rotate(ghostItem.angle);
+    ctx.globalAlpha = (ghostItem.life / ghostItem.maxLife) * 0.45;
+    ctx.fillStyle = COLORS.player;
+    drawShipShape(ctx);
+    ctx.fill();
+    ctx.restore();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawPlayer(ctx, world) {
+  const player = world.player;
+  if (world.state === 'over' || world.state === 'title') return;
+  const blink = player.invulnerable > 0 && Math.floor(world.time * 14) % 2 === 0;
+  if (blink) return;
+
+  // Soft halo so the ship reads at a glance against the starfield.
+  const halo = ctx.createRadialGradient(player.x, player.y, 0, player.x, player.y, 30);
+  halo.addColorStop(0, 'rgba(87, 247, 255, 0.20)');
+  halo.addColorStop(1, 'rgba(87, 247, 255, 0)');
+  ctx.fillStyle = halo;
+  ctx.beginPath();
+  ctx.arc(player.x, player.y, 30, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.save();
+  ctx.translate(player.x, player.y);
+  ctx.rotate(player.angle);
+  // Squash and stretch along the dash direction while dashing.
+  if (player.dashTimer > 0) ctx.scale(1.28, 0.78);
+
+  // Engine flame, flickering with the clock.
+  if (player.thrust > 0.2) {
+    const flicker = 0.8 + 0.4 * Math.sin(world.time * 42);
+    const len = (10 + player.thrust * 12) * flicker;
+    glow(ctx, '#ffb02e', 10);
+    ctx.fillStyle = 'rgba(255, 176, 46, 0.9)';
+    ctx.beginPath();
+    ctx.moveTo(-10, 5);
+    ctx.lineTo(-10 - len, 0);
+    ctx.lineTo(-10, -5);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  glow(ctx, COLORS.player, 18);
+  ctx.fillStyle = COLORS.player;
+  drawShipShape(ctx);
   ctx.fill();
   noGlow(ctx);
   ctx.fillStyle = COLORS.playerCore;
@@ -76,8 +145,10 @@ function drawPlayer(ctx, world) {
 
 function drawEnemy(ctx, enemy) {
   const color = enemy.flash > 0 ? '#ffffff' : COLORS[enemy.kind];
+  const pop = easeOutBack(clamp(enemy.spawnT / 0.25, 0, 1));
   ctx.save();
   ctx.translate(enemy.x, enemy.y);
+  ctx.scale(pop, pop);
   glow(ctx, color, 14);
   ctx.fillStyle = color;
   ctx.strokeStyle = color;
@@ -175,6 +246,18 @@ function drawEnemy(ctx, enemy) {
 function drawBullets(ctx, world) {
   for (const bullet of world.bullets) {
     const color = bullet.friendly ? COLORS.bullet : COLORS.enemyBullet;
+    // Trail: a short streak back along the velocity, so shots read as motion.
+    const tailX = bullet.x - bullet.vx * 0.035;
+    const tailY = bullet.y - bullet.vy * 0.035;
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = 0.55;
+    ctx.lineWidth = 3;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(tailX, tailY);
+    ctx.lineTo(bullet.x, bullet.y);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
     glow(ctx, color, 10);
     ctx.fillStyle = color;
     ctx.beginPath();
@@ -188,6 +271,8 @@ function drawPickups(ctx, world) {
   for (const pickup of world.pickups) {
     const color = COLORS[pickup.kind];
     const pulse = 1 + 0.18 * Math.sin(world.time * 6 + pickup.x);
+    // A shard near expiry blinks so the player knows to hurry.
+    if (pickup.life < 2 && Math.floor(world.time * 8) % 2 === 0) continue;
     glow(ctx, color, 12);
     ctx.fillStyle = color;
     ctx.save();
@@ -214,7 +299,8 @@ function drawPickups(ctx, world) {
 }
 
 function drawParticles(ctx, world) {
-  for (const particle of world.particles) {
+  for (const particle of world.juice.particles) {
+    if (!particle.active) continue;
     ctx.globalAlpha = Math.max(0, particle.life / particle.maxLife);
     ctx.fillStyle = particle.color;
     ctx.beginPath();
@@ -226,61 +312,110 @@ function drawParticles(ctx, world) {
 
 function drawTexts(ctx, world) {
   ctx.textAlign = 'center';
-  for (const text of world.texts) {
-    ctx.globalAlpha = Math.max(0, text.life / 0.9);
-    ctx.font = `bold ${text.size}px "Segoe UI", system-ui, sans-serif`;
+  for (const text of world.juice.texts) {
+    ctx.globalAlpha = Math.max(0, text.life / text.maxLife);
+    ctx.font = `bold ${text.size}px ${FONT}`;
     ctx.fillStyle = text.color;
     ctx.fillText(text.text, text.x, text.y);
   }
   ctx.globalAlpha = 1;
 }
 
-function drawHud(ctx, world) {
+function drawVignette(ctx, world) {
+  const hurt = world.juice.flash * 0.4;
+  const lowHull = world.player.hull === 1 && (world.state === 'playing' || world.state === 'dying')
+    ? 0.1 + 0.06 * Math.sin(world.time * 4)
+    : 0;
+  const alpha = Math.min(0.5, hurt + lowHull);
+  if (alpha <= 0.01) return;
+  const gradient = ctx.createRadialGradient(
+    ARENA_WIDTH / 2, ARENA_HEIGHT / 2, ARENA_HEIGHT * 0.45,
+    ARENA_WIDTH / 2, ARENA_HEIGHT / 2, ARENA_HEIGHT * 0.85,
+  );
+  gradient.addColorStop(0, 'rgba(255, 40, 70, 0)');
+  gradient.addColorStop(1, `rgba(255, 40, 70, ${alpha})`);
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, ARENA_WIDTH, ARENA_HEIGHT);
+}
+
+function drawHud(ctx, world, showBanner = true) {
+  // Score, popping briefly on every gain.
+  const pop = 1 + 0.22 * easeOutCubic(world.juice.scorePop);
+  ctx.save();
+  ctx.translate(22, 40);
+  ctx.scale(pop, pop);
   ctx.textAlign = 'left';
-  ctx.font = 'bold 26px "Segoe UI", system-ui, sans-serif';
+  ctx.font = `bold 26px ${FONT}`;
   ctx.fillStyle = COLORS.text;
   glow(ctx, COLORS.player, 8);
-  ctx.fillText(String(world.score).padStart(6, '0'), 22, 40);
+  ctx.fillText(String(world.score).padStart(6, '0'), 0, 0);
+  ctx.restore();
   noGlow(ctx);
-  ctx.font = '13px "Segoe UI", system-ui, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.font = `13px ${FONT}`;
   ctx.fillStyle = COLORS.dimText;
   ctx.fillText(`BEST ${Math.max(world.best, world.score)}`, 22, 60);
+
+  // Combo with its countdown bar.
   const mult = multiplier(world);
-  if (mult > 1) {
-    ctx.font = 'bold 16px "Segoe UI", system-ui, sans-serif';
+  if (mult > 1 || world.combo > 0) {
+    ctx.font = `bold 16px ${FONT}`;
     ctx.fillStyle = COLORS.shard;
-    ctx.fillText(`x${mult}  COMBO ${world.combo}`, 22, 84);
+    ctx.fillText(mult > 1 ? `x${mult}  COMBO ${world.combo}` : `COMBO ${world.combo}`, 22, 84);
+    ctx.fillStyle = 'rgba(255, 224, 102, 0.25)';
+    ctx.fillRect(22, 90, 120, 5);
+    ctx.fillStyle = COLORS.shard;
+    ctx.fillRect(22, 90, 120 * comboFraction(world), 5);
   }
 
   // Wave, centered.
   ctx.textAlign = 'center';
-  ctx.font = 'bold 20px "Segoe UI", system-ui, sans-serif';
+  ctx.font = `bold 20px ${FONT}`;
   ctx.fillStyle = COLORS.text;
   ctx.fillText(`WAVE ${world.wave}`, ARENA_WIDTH / 2, 36);
-  ctx.font = '13px "Segoe UI", system-ui, sans-serif';
+  ctx.font = `13px ${FONT}`;
   ctx.fillStyle = COLORS.dimText;
   ctx.fillText(`${Math.max(0, world.enemies.length + world.waveQueue.length)} HOSTILES LEFT`, ARENA_WIDTH / 2, 56);
 
-  // Hull hearts, top right.
+  // Boss bar while the Warden lives.
+  const warden = world.enemies.find((e) => e.kind === 'warden');
+  if (warden) {
+    ctx.font = `bold 13px ${FONT}`;
+    ctx.fillStyle = COLORS.warden;
+    ctx.fillText('THE WARDEN', ARENA_WIDTH / 2, 78);
+    ctx.fillStyle = 'rgba(255, 122, 217, 0.25)';
+    ctx.fillRect(ARENA_WIDTH / 2 - 150, 84, 300, 7);
+    ctx.fillStyle = COLORS.warden;
+    ctx.fillRect(ARENA_WIDTH / 2 - 150, 84, 300 * (warden.hp / warden.maxHp), 7);
+  }
+
+  // Hull hearts, top right. Empty hearts keep a white outline, so the
+  // maximum is readable as well as the current hull.
   ctx.textAlign = 'right';
   for (let i = 0; i < PLAYER.maxHull; i += 1) {
     const x = ARENA_WIDTH - 28 - i * 30;
     const y = 32;
-    ctx.fillStyle = i < world.player.hull ? '#ff5b7f' : 'rgba(255, 255, 255, 0.15)';
     ctx.save();
     ctx.translate(x, y);
     ctx.beginPath();
     ctx.moveTo(0, 8);
     ctx.bezierCurveTo(-11, -2, -6, -10, 0, -4);
     ctx.bezierCurveTo(6, -10, 11, -2, 0, 8);
-    ctx.fill();
+    if (i < world.player.hull) {
+      ctx.fillStyle = COLORS.danger;
+      ctx.fill();
+    } else {
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
     ctx.restore();
   }
 
   // Dash cooldown bar, bottom left.
   const dashReady = world.player.dashCooldown <= 0;
   ctx.textAlign = 'left';
-  ctx.font = 'bold 12px "Segoe UI", system-ui, sans-serif';
+  ctx.font = `bold 12px ${FONT}`;
   ctx.fillStyle = dashReady ? COLORS.player : COLORS.dimText;
   ctx.fillText(dashReady ? 'DASH READY [SPACE]' : 'DASH…', 22, ARENA_HEIGHT - 34);
   ctx.fillStyle = 'rgba(255, 255, 255, 0.12)';
@@ -289,20 +424,49 @@ function drawHud(ctx, world) {
   ctx.fillStyle = COLORS.player;
   ctx.fillRect(22, ARENA_HEIGHT - 28, 110 * dashFill, 8);
 
+  // Weapon meter, bottom center: level name and shard pips to the next gun.
+  const progress = weaponProgress(world);
+  ctx.textAlign = 'center';
+  ctx.font = `bold 12px ${FONT}`;
+  ctx.fillStyle = COLORS.shard;
+  ctx.fillText(`GUN ${progress.name}${progress.needed === null ? ' — MAX' : ''}`, ARENA_WIDTH / 2, ARENA_HEIGHT - 34);
+  if (progress.needed !== null) {
+    const prevNeeded = progress.level === 0 ? 0 : WEAPONS[progress.level].shardsNeeded;
+    const span = progress.needed - prevNeeded;
+    const have = progress.shards - prevNeeded;
+    for (let i = 0; i < span; i += 1) {
+      const px = ARENA_WIDTH / 2 - (span - 1) * 7 + i * 14;
+      const py = ARENA_HEIGHT - 20;
+      ctx.save();
+      ctx.translate(px, py);
+      ctx.rotate(Math.PI / 4);
+      ctx.fillStyle = i < have ? COLORS.shard : 'rgba(255, 224, 102, 0.25)';
+      ctx.fillRect(-3.5, -3.5, 7, 7);
+      ctx.restore();
+    }
+  }
+
   // Nova charges, bottom right.
   ctx.textAlign = 'right';
-  ctx.font = 'bold 12px "Segoe UI", system-ui, sans-serif';
+  ctx.font = `bold 12px ${FONT}`;
   ctx.fillStyle = world.player.nova > 0 ? COLORS.nova : COLORS.dimText;
   ctx.fillText(`NOVA [E]  ${'●'.repeat(world.player.nova)}${'○'.repeat(PLAYER.maxNova - world.player.nova)}`, ARENA_WIDTH - 22, ARENA_HEIGHT - 34);
 
-  // Wave banner.
-  if (world.bannerTimer > 0) {
+  // Wave banner, easing in with an overshoot. The title screen hides it so
+  // it never collides with the title text.
+  if (showBanner && world.bannerTimer > 0) {
+    const age = 2.2 - world.bannerTimer;
+    const scale = age < 0.35 ? easeOutBack(clamp(age / 0.35, 0, 1)) : 1;
+    ctx.save();
+    ctx.translate(ARENA_WIDTH / 2, 120);
+    ctx.scale(scale, scale);
     ctx.textAlign = 'center';
     ctx.globalAlpha = Math.min(1, world.bannerTimer);
-    ctx.font = 'bold 34px "Segoe UI", system-ui, sans-serif';
+    ctx.font = `bold 34px ${FONT}`;
     glow(ctx, COLORS.player, 16);
     ctx.fillStyle = COLORS.text;
-    ctx.fillText(world.banner, ARENA_WIDTH / 2, 120);
+    ctx.fillText(world.banner, 0, 0);
+    ctx.restore();
     noGlow(ctx);
     ctx.globalAlpha = 1;
   }
@@ -318,67 +482,102 @@ function centerText(ctx, text, y, font, color, glowColor) {
 }
 
 function drawTitle(ctx, world) {
-  ctx.fillStyle = 'rgba(4, 6, 16, 0.55)';
+  // A vertical scrim: dark where the text sits, clear at the top and
+  // bottom so the demo run and the HUD show through around it.
+  const scrim = ctx.createLinearGradient(0, 0, 0, ARENA_HEIGHT);
+  scrim.addColorStop(0, 'rgba(4, 6, 16, 0)');
+  scrim.addColorStop(0.13, 'rgba(4, 6, 16, 0)');
+  scrim.addColorStop(0.22, 'rgba(4, 6, 16, 0.74)');
+  scrim.addColorStop(0.78, 'rgba(4, 6, 16, 0.74)');
+  scrim.addColorStop(0.88, 'rgba(4, 6, 16, 0)');
+  scrim.addColorStop(1, 'rgba(4, 6, 16, 0)');
+  ctx.fillStyle = scrim;
   ctx.fillRect(0, 0, ARENA_WIDTH, ARENA_HEIGHT);
-  centerText(ctx, 'LUMEN DRIFT', 150, 'bold 72px "Segoe UI", system-ui, sans-serif', COLORS.text, COLORS.player);
-  centerText(ctx, 'a neon arena survival — outlast the swarm, feed the light', 195, '18px "Segoe UI", system-ui, sans-serif', COLORS.dimText);
+
+  centerText(ctx, 'LUMEN DRIFT', 150, `bold 72px ${FONT}`, COLORS.text, COLORS.player);
+  centerText(ctx, 'a neon arena survival — outlast the swarm, feed the light', 195, `18px ${FONT}`, COLORS.dimText);
+  centerText(ctx, 'Survive the waves. Beat the Warden every 5th wave. One run, no continues.', 232, `15px ${FONT}`, COLORS.shard);
   const lines = [
     'WASD / ARROWS — steer the Lumen',
     'MOUSE — aim   ·   HOLD CLICK — fire',
     'SPACE — dash through danger   ·   E / RIGHT-CLICK — nova blast',
-    'Chain kills to raise your multiplier. Three hull. No mercy.',
+    'Shards upgrade your gun. Chain kills to raise your multiplier.',
   ];
   lines.forEach((line, i) => {
-    centerText(ctx, line, 268 + i * 30, '16px "Segoe UI", system-ui, sans-serif', COLORS.text);
+    centerText(ctx, line, 278 + i * 30, `16px ${FONT}`, COLORS.text);
   });
   const pulse = 0.72 + 0.28 * Math.sin(world.time * 3);
   ctx.globalAlpha = pulse;
-  centerText(ctx, 'CLICK OR PRESS ENTER TO FLY', 440, 'bold 22px "Segoe UI", system-ui, sans-serif', COLORS.player, COLORS.player);
+  centerText(ctx, 'CLICK OR PRESS ENTER TO FLY', 442, `bold 22px ${FONT}`, COLORS.player, COLORS.player);
   ctx.globalAlpha = 1;
   if (world.best > 0) {
-    centerText(ctx, `BEST SCORE  ${world.best}`, 485, '15px "Segoe UI", system-ui, sans-serif', COLORS.dimText);
+    centerText(ctx, `BEST SCORE  ${world.best}`, 485, `15px ${FONT}`, COLORS.dimText);
   }
-  centerText(ctx, 'P pause   ·   M mute   ·   R restart', 540, '13px "Segoe UI", system-ui, sans-serif', COLORS.dimText);
+  centerText(ctx, 'P pause   ·   M mute   ·   R restart', 540, `13px ${FONT}`, COLORS.dimText);
 }
 
 function drawPaused(ctx) {
   ctx.fillStyle = 'rgba(4, 6, 16, 0.6)';
   ctx.fillRect(0, 0, ARENA_WIDTH, ARENA_HEIGHT);
-  centerText(ctx, 'PAUSED', 260, 'bold 54px "Segoe UI", system-ui, sans-serif', COLORS.text, COLORS.player);
-  centerText(ctx, 'ESC / P to resume   ·   R to restart   ·   M to mute', 310, '17px "Segoe UI", system-ui, sans-serif', COLORS.dimText);
+  centerText(ctx, 'PAUSED', 240, `bold 54px ${FONT}`, COLORS.text, COLORS.player);
+  centerText(ctx, 'WASD steer   ·   Mouse aim   ·   Hold click fire', 300, `17px ${FONT}`, COLORS.dimText);
+  centerText(ctx, 'SPACE dash   ·   E nova   ·   M mute', 330, `17px ${FONT}`, COLORS.dimText);
+  centerText(ctx, 'ESC / P to resume   ·   R to restart', 380, `bold 19px ${FONT}`, COLORS.text);
+}
+
+function formatTime(seconds) {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${String(s).padStart(2, '0')}`;
 }
 
 function drawGameOver(ctx, world) {
   ctx.fillStyle = 'rgba(10, 4, 12, 0.62)';
   ctx.fillRect(0, 0, ARENA_WIDTH, ARENA_HEIGHT);
-  centerText(ctx, 'THE LIGHT FADES', 150, 'bold 56px "Segoe UI", system-ui, sans-serif', '#ff8fa3', '#ff4d8d');
+  centerText(ctx, 'THE LIGHT FADES', 140, `bold 56px ${FONT}`, '#ff8fa3', '#ff4d8d');
   if (world.newBest) {
-    centerText(ctx, '★ NEW BEST SCORE ★', 200, 'bold 20px "Segoe UI", system-ui, sans-serif', COLORS.shard, COLORS.shard);
+    centerText(ctx, '★ NEW BEST SCORE ★', 188, `bold 20px ${FONT}`, COLORS.shard, COLORS.shard);
   }
-  centerText(ctx, `SCORE  ${world.score}`, 268, 'bold 40px "Segoe UI", system-ui, sans-serif', COLORS.text);
-  centerText(ctx, `WAVE ${world.wave}  ·  BEST ${world.best}`, 312, '19px "Segoe UI", system-ui, sans-serif', COLORS.dimText);
+  centerText(ctx, `SCORE  ${world.score}`, 258, `bold 40px ${FONT}`, COLORS.text);
+  centerText(ctx, `WAVE ${world.wave}  ·  KILLS ${world.kills}  ·  BEST COMBO x${world.maxCombo}`, 302, `19px ${FONT}`, COLORS.dimText);
+  centerText(ctx, `SURVIVED ${formatTime(world.runTime)}  ·  BEST ${world.best}`, 332, `19px ${FONT}`, COLORS.dimText);
   const pulse = 0.72 + 0.28 * Math.sin(world.time * 3);
   ctx.globalAlpha = pulse;
-  centerText(ctx, 'PRESS R OR CLICK TO FLY AGAIN', 420, 'bold 22px "Segoe UI", system-ui, sans-serif', COLORS.player, COLORS.player);
+  centerText(ctx, 'PRESS R OR CLICK TO FLY AGAIN', 430, `bold 22px ${FONT}`, COLORS.player, COLORS.player);
   ctx.globalAlpha = 1;
 }
 
-export function render(ctx, world) {
+// mode 'title' draws the demo world with a dimmed HUD and the title screen
+// over it; mode 'game' draws the run and its state overlays.
+export function render(ctx, world, mode = 'game') {
   ctx.save();
-  if (world.shake > 0) {
-    ctx.translate((Math.random() - 0.5) * world.shake, (Math.random() - 0.5) * world.shake);
+  if (!world.reduceMotion) {
+    const offset = shakeOffset(world.juice, world.time);
+    ctx.translate(offset.x, offset.y);
   }
   drawStarfield(ctx, world);
+  drawRings(ctx, world);
   drawPickups(ctx, world);
   for (const enemy of world.enemies) drawEnemy(ctx, enemy);
   drawBullets(ctx, world);
+  drawGhosts(ctx, world);
   drawParticles(ctx, world);
   drawPlayer(ctx, world);
   drawTexts(ctx, world);
   ctx.restore();
 
-  if (world.state === 'playing' || world.state === 'paused') drawHud(ctx, world);
-  if (world.state === 'title') drawTitle(ctx, world);
+  drawVignette(ctx, world);
+
+  if (mode === 'title') {
+    ctx.save();
+    ctx.globalAlpha = 0.55;
+    drawHud(ctx, world, false);
+    ctx.restore();
+    drawTitle(ctx, world);
+    return;
+  }
+
+  if (world.state === 'playing' || world.state === 'paused' || world.state === 'dying') drawHud(ctx, world);
   if (world.state === 'paused') drawPaused(ctx);
   if (world.state === 'over') drawGameOver(ctx, world);
 }

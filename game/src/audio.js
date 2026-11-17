@@ -1,6 +1,11 @@
 // All sound is synthesized with WebAudio: no audio files ship with the game.
 // A tiny synth builds each effect from oscillators and filtered noise, and a
-// slow pad loop plays underneath while a run is in progress.
+// slow pad loop plays underneath while a run is in progress. Pitches are
+// randomized a little on every play so repeated shots never sound mechanical,
+// and pickups climb a pentatonic ladder when grabbed in quick succession.
+// The mute flag lives in the shared save and survives a reload.
+import { loadSave, saveSave } from './save.js';
+
 const MUSIC_CHORDS = [
   [110.0, 164.81, 220.0],
   [87.31, 130.81, 174.61],
@@ -8,14 +13,45 @@ const MUSIC_CHORDS = [
   [98.0, 146.83, 220.0],
 ];
 
+// Pentatonic ladder for chained pickups: each quick pickup steps up a note.
+const PICKUP_LADDER = [660, 740, 880, 990, 1174, 1318, 1568, 1760];
+
+function detune(freq, percent) {
+  return freq * (1 + (Math.random() * 2 - 1) * percent);
+}
+
+export const silentAudio = {
+  shoot: () => {},
+  enemyShoot: () => {},
+  hit: () => {},
+  explosion: () => {},
+  pickup: () => {},
+  heal: () => {},
+  dash: () => {},
+  nova: () => {},
+  hurt: () => {},
+  wave: () => {},
+  waveClear: () => {},
+  gameOver: () => {},
+  click: () => {},
+  comboUp: () => {},
+  weaponUp: () => {},
+  wardenRoar: () => {},
+  startMusic: () => {},
+  stopMusic: () => {},
+};
+
 export function createAudio() {
   const audio = {
     context: null,
     master: null,
+    sfxGain: null,
     musicGain: null,
-    muted: false,
+    muted: loadSave().muted,
     musicTimer: null,
     chordIndex: 0,
+    pickupStep: 0,
+    pickupAt: 0,
   };
 
   audio.ensure = () => {
@@ -28,8 +64,11 @@ export function createAudio() {
       if (!Ctor) return false;
       audio.context = new Ctor();
       audio.master = audio.context.createGain();
-      audio.master.gain.value = 0.5;
+      audio.master.gain.value = audio.muted ? 0 : 0.5;
       audio.master.connect(audio.context.destination);
+      audio.sfxGain = audio.context.createGain();
+      audio.sfxGain.gain.value = 1;
+      audio.sfxGain.connect(audio.master);
       audio.musicGain = audio.context.createGain();
       audio.musicGain.gain.value = 0.05;
       audio.musicGain.connect(audio.master);
@@ -41,21 +80,22 @@ export function createAudio() {
 
   audio.setMuted = (muted) => {
     audio.muted = muted;
+    saveSave({ muted });
     if (audio.master) audio.master.gain.value = muted ? 0 : 0.5;
   };
 
-  function tone({ type, from, to, duration, volume, when = 0 }) {
+  function tone({ type, from, to, duration, volume, when = 0, bus = null }) {
     if (!audio.context || audio.muted) return;
     const start = audio.context.currentTime + when;
     const osc = audio.context.createOscillator();
     const gain = audio.context.createGain();
     osc.type = type;
-    osc.frequency.setValueAtTime(from, start);
+    osc.frequency.setValueAtTime(Math.max(1, from), start);
     if (to !== undefined) osc.frequency.exponentialRampToValueAtTime(Math.max(1, to), start + duration);
     gain.gain.setValueAtTime(volume, start);
     gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
     osc.connect(gain);
-    gain.connect(audio.master);
+    gain.connect(bus || audio.sfxGain);
     osc.start(start);
     osc.stop(start + duration + 0.02);
   }
@@ -77,20 +117,24 @@ export function createAudio() {
     gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
     source.connect(filter);
     filter.connect(gain);
-    gain.connect(audio.master);
+    gain.connect(audio.sfxGain);
     source.start(start);
   }
 
-  audio.shoot = () => tone({ type: 'square', from: 880, to: 440, duration: 0.08, volume: 0.08 });
-  audio.enemyShoot = () => tone({ type: 'sawtooth', from: 220, to: 160, duration: 0.12, volume: 0.05 });
-  audio.hit = () => noise({ duration: 0.08, volume: 0.12, frequency: 2400 });
+  audio.shoot = () => tone({ type: 'square', from: detune(880, 0.05), to: 440, duration: 0.08, volume: 0.07 });
+  audio.enemyShoot = () => tone({ type: 'sawtooth', from: detune(220, 0.06), to: 160, duration: 0.12, volume: 0.05 });
+  audio.hit = () => noise({ duration: 0.07, volume: 0.1, frequency: detune(2400, 0.15) });
   audio.explosion = (big = false) => {
-    noise({ duration: big ? 0.5 : 0.25, volume: big ? 0.3 : 0.16, frequency: big ? 500 : 900 });
+    noise({ duration: big ? 0.5 : 0.25, volume: big ? 0.3 : 0.15, frequency: big ? 500 : 900 });
     tone({ type: 'sine', from: big ? 120 : 180, to: 40, duration: big ? 0.5 : 0.25, volume: 0.22 });
   };
   audio.pickup = () => {
-    tone({ type: 'sine', from: 660, duration: 0.09, volume: 0.12 });
-    tone({ type: 'sine', from: 990, duration: 0.12, volume: 0.12, when: 0.07 });
+    const now = performance.now();
+    audio.pickupStep = now - audio.pickupAt < 1200 ? audio.pickupStep + 1 : 0;
+    audio.pickupAt = now;
+    const base = PICKUP_LADDER[Math.min(audio.pickupStep, PICKUP_LADDER.length - 1)];
+    tone({ type: 'sine', from: base, duration: 0.09, volume: 0.12 });
+    tone({ type: 'sine', from: base * 1.5, duration: 0.14, volume: 0.11, when: 0.07 });
   };
   audio.heal = () => {
     tone({ type: 'sine', from: 523, duration: 0.12, volume: 0.14 });
@@ -109,12 +153,30 @@ export function createAudio() {
     tone({ type: 'triangle', from: 392, duration: 0.16, volume: 0.14 });
     tone({ type: 'triangle', from: 523, duration: 0.22, volume: 0.14, when: 0.12 });
   };
+  audio.waveClear = () => {
+    [523, 659, 784, 1046].forEach((freq, i) => {
+      tone({ type: 'triangle', from: freq, duration: 0.18, volume: 0.13, when: i * 0.09 });
+    });
+  };
   audio.gameOver = () => {
     [392, 311, 233, 175].forEach((freq, i) => {
       tone({ type: 'triangle', from: freq, duration: 0.34, volume: 0.16, when: i * 0.28 });
     });
   };
   audio.click = () => tone({ type: 'sine', from: 700, to: 900, duration: 0.06, volume: 0.1 });
+  audio.comboUp = () => {
+    tone({ type: 'sine', from: 880, duration: 0.1, volume: 0.13 });
+    tone({ type: 'sine', from: 1320, duration: 0.16, volume: 0.13, when: 0.08 });
+  };
+  audio.weaponUp = () => {
+    [440, 554, 659, 880].forEach((freq, i) => {
+      tone({ type: 'square', from: freq, duration: 0.12, volume: 0.09, when: i * 0.07 });
+    });
+  };
+  audio.wardenRoar = () => {
+    tone({ type: 'sawtooth', from: 60, to: 180, duration: 0.8, volume: 0.22 });
+    noise({ duration: 0.7, volume: 0.14, frequency: 400 });
+  };
 
   audio.startMusic = () => {
     if (!audio.ensure() || audio.musicTimer !== null) return;
@@ -124,11 +186,11 @@ export function createAudio() {
       audio.chordIndex += 1;
       const now = audio.context.currentTime;
       for (const freq of chord) {
-        for (const detune of [-4, 4]) {
+        for (const detuneCents of [-4, 4]) {
           const osc = audio.context.createOscillator();
           osc.type = 'triangle';
           osc.frequency.value = freq;
-          osc.detune.value = detune;
+          osc.detune.value = detuneCents;
           const gain = audio.context.createGain();
           gain.gain.setValueAtTime(0.0001, now);
           gain.gain.linearRampToValueAtTime(0.5, now + 1.5);

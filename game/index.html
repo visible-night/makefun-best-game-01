@@ -14,8 +14,9 @@
     <p class="tagline">Outlast the swarm. Feed the light.</p>
   </header>
   <div class="stage">
-    <canvas id="game" width="960" height="600"></canvas>
+    <canvas id="game" width="960" height="600" tabindex="0" aria-label="Lumen Drift game area. Steer with WASD or arrow keys, aim with the mouse, hold click to fire, Space to dash, E for nova."></canvas>
   </div>
+  <div id="score-live" class="visually-hidden" aria-live="polite"></div>
   <footer class="controls">
     <span><b>WASD / arrows</b> steer</span>
     <span><b>Mouse</b> aim</span>
@@ -23,8 +24,8 @@
     <span><b>Space</b> dash</span>
     <span><b>E / right-click</b> nova</span>
     <span><b>P</b> pause</span>
-    <span><b>M</b> mute</span>
     <span><b>R</b> restart</span>
+    <button id="mute-btn" type="button" aria-pressed="false" aria-label="Mute or unmute sound">Mute</button>
   </footer>
 </main>
 <script type="module" src="./src/main.js"></script>
