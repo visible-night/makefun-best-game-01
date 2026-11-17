@@ -1,0 +1,78 @@
+/* Lumen Drift — page chrome around the canvas. The game itself draws
+   everything inside the canvas; this only centers it on a dark page. */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  background: radial-gradient(1200px 700px at 50% -10%, #101a3a 0%, #05070f 60%);
+  color: #eaf6ff;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+.page {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 18px 12px 22px;
+}
+
+.masthead {
+  text-align: center;
+}
+
+.masthead h1 {
+  font-size: 30px;
+  letter-spacing: 0.35em;
+  text-indent: 0.35em;
+  color: #eaf6ff;
+  text-shadow: 0 0 18px rgba(87, 247, 255, 0.75), 0 0 42px rgba(87, 247, 255, 0.35);
+}
+
+.tagline {
+  margin-top: 4px;
+  font-size: 14px;
+  color: #8fa8c8;
+  letter-spacing: 0.08em;
+}
+
+.stage {
+  border-radius: 10px;
+  box-shadow:
+    0 0 0 1px rgba(87, 247, 255, 0.25),
+    0 0 44px rgba(87, 247, 255, 0.18),
+    0 24px 60px rgba(0, 0, 0, 0.6);
+}
+
+canvas {
+  display: block;
+  width: min(1100px, 96vw);
+  height: auto;
+  border-radius: 10px;
+  background: #070b1a;
+  cursor: crosshair;
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px 18px;
+  font-size: 13px;
+  color: #8fa8c8;
+}
+
+.controls b {
+  color: #eaf6ff;
+  font-weight: 600;
+}
